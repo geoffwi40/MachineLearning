@@ -5,18 +5,133 @@ date: "Thursday, January 28, 2016"
 output: html_document
 ---
 
-This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
-
-When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
-
-```{r}
-summary(cars)
+```{r,echo=FALSE, message=FALSE, warning=FALSE,cache=TRUE}
+library(caret)
+library(doParallel)
+library(ggplot2)
+library(gridExtra)
+set.seed(300)
+df<-read.csv("pml-training.csv",stringsAsFactors=FALSE)
+cl <- makeCluster(detectCores())
+registerDoParallel(cl)
 ```
 
-You can also embed plots, for example:
+## Overview
+In this paper we'll be looking at the data set produced by Ugulino, W.; Cardador, D.; Vega, K.; Velloso, E.; Milidiu, R.; Fuks, H. in respect Fitness bands and predicting if a person was doing a dumbbell bicep curl correctly. The intent is to generate a model predicting whether the person was performing the correct arm action or one of 4 other common mistakes. To be successful, we will need to achieve  an accuracy of 99% or better when predicting the action (this will be referred to as 'class') from the data.
 
-```{r, echo=FALSE}
-plot(cars)
+
+##Data cleansing
+When we first look at the data we first that there are some initial columns reflecting things such as the row number, the person wearing the fitness band and time information. While these could be important in other models, we're attempting to predict class based on a single set of measurements regardless of who wore the band or point in time, so we'll filter these out
+```{r,cache=TRUE}
+df<-df[,-(1:7)]
 ```
 
-Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
+
+There are also columns with lots of blank character values and divide by zero errors. So we'll change these to NA. 
+
+```{r,cache=TRUE}
+df[df==""]<-NA
+df[df=="#DIV/0!"]<-NA
+```
+Also we'll now drop columns that have more than 80% NA values as these add virtually no information. All the remaining columns are measurements so should be numeric. Some have been read in as character so we'll also convert these columns to numeric
+
+
+```{r,cache=TRUE}
+#save and drop the class values while we filter columns
+classe<-as.factor(df$classe)
+df<-df[,-153]
+
+# Find the columns with columns shown as characters and convert them
+for(i in colnames(df)) {
+    if (typeof(df[,i])=="character") df[,i]<-as.numeric(df[,i])
+}
+
+#find the sum of NA in each column and drop the ones for which are 80% or more NA
+na_count<-apply(df,2,function(x) sum(is.na(x)))
+na_count<-as.data.frame(na_count)
+cutoff<-0.8*nrow(df)
+drops<-vector()
+for(i in colnames(df)) {
+    if(na_count[i,1]>cutoff) drops<-c(drops,i)
+}
+df<-df[,!(names(df) %in% drops)]
+
+#Restore the class column
+df$classe<-classe
+```
+
+The result is we now have 52 fairly clean columns we can use as predictors
+
+##Exploration
+While there are two many predictors to show with any clarity in one view, two are shown based here that show a clear predictor for whether the class was A or something else (A being correct action and B,C,D,E being incorrect action) 
+```{r,echo=FALSE,cache=TRUE}
+plot2<-qplot(classe,yaw_belt, data=df,geom="boxplot")
+plot1<-qplot(classe,roll_belt, data=df,geom="boxplot")
+grid.arrange(plot1, plot2, nrow=1, ncol=2)
+```
+
+So we can see just for these two predictors, there is a strong indicator the median of each could be used for predicting A or non-A. For other predictors (not shown for brevity), further breakdown can be seen in the medians breaking down specific classes
+
+
+##Modeling
+To model this several decisions were made specifically:
+
+* We will try three methods (again for brevity) and pick the best. To enable this, we will split the supplied training set into two sets -> a training (70%) and test set(30%). Validation of the final result will be done with a separately supplied test set
+
+* K-Fold cross validation will be used. as the sample set is relatively large, a larger K value will be used (reduces biases and increases variability)
+
+```{r,echo=TRUE,cache=TRUE}
+inTrain<-createDataPartition(y=df$classe,p=0.7,list=FALSE)
+training<-df[inTrain,]
+testing<-df[-inTrain,]
+```
+
+###Rpart method (tree classification)
+```{r,cache=TRUE,message=FALSE}
+modFitRP<-train(training$classe~.,method="rpart",data=training,trControl = trainControl(method="cv",number=10))
+confusionMatrix(testing$classe, predict(modFitRP,testing))$overall
+```
+As can be seen the accuracy when run against the test set was quite low hitting less than 50%
+
+###Random forest method
+```{r,cache=TRUE,message=FALSE}
+modFitRF<-train(training$classe~.,method="rf",data=training,trControl = trainControl(method="cv",number=10))
+confusionMatrix(testing$classe, predict(modFitRF,testing))$overall
+```
+This has a much better accuracy hitting the 99% accuracy we're aiming for. 
+
+###Boosting method
+```{r,cache=TRUE,message=FALSE}
+modFitGBM<-train(training$classe~.,method="gbm",data=training,trControl = trainControl(method="cv",number=10),verbose=FALSE)
+confusionMatrix(testing$classe, predict(modFitGBM,testing))$overall
+```
+
+As can be seen this method is quite good but slightly under performs compared to the random forest method
+
+So based on this, the Random forest will be the selected model
+
+##Predictors of the chosen model
+If we look at how many predictors actually were of importance we can see 
+```{r, cache=TRUE}
+plot(modFitRF)
+```
+
+This shows that of the 52 predictors only about 28 had significant effect and the rest adding little information
+```{r, cache=TRUE}
+varImp(modFitRF)
+```
+As shown earlier the first two predictors added most of information in predicting A or non-A with the remaining 26 or so predictors supplying the information about the difference in B,C,D & E
+
+Finally if we look at the estimate of the out-of-sample error from the model based on our testing set we see its less than 1% (quite low)
+```{r, cache=TRUE}
+pred<-predict(modFitRF,testing)
+sum(testing$classe!=pred)/nrow(testing)
+```
+
+##Evaluation again the validation data
+There were 20 cases in the validation data, the model fitted them all correctly
+
+
+
+
+
